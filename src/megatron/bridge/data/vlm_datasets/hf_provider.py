@@ -26,6 +26,7 @@ from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
 
 from .conversation_dataset import VLMConversationDataset
 from .hf_dataset_makers import (
+    make_custom_dataset,
     make_cord_v2_dataset,
     make_cv17_dataset,
     make_medpix_dataset,
@@ -68,6 +69,7 @@ class HFDatasetConversationProvider(DatasetProvider):
 
     def _get_maker(self) -> Callable[..., List[Dict[str, Any]]]:
         registry: Dict[str, Callable[..., List[Dict[str, Any]]]] = {
+            "make_custom_dataset": make_custom_dataset,
             "make_rdr_dataset": make_rdr_dataset,
             "make_cord_v2_dataset": make_cord_v2_dataset,
             "make_medpix_dataset": make_medpix_dataset,
@@ -79,6 +81,7 @@ class HFDatasetConversationProvider(DatasetProvider):
             return registry[self.maker_name]
         # Allow passing function name alias without prefix, e.g., "rdr" -> make_rdr_dataset
         alias_map = {
+            "custom": "make_custom_dataset",
             "rdr": "make_rdr_dataset",
             "cord_v2": "make_cord_v2_dataset",
             "medpix": "make_medpix_dataset",

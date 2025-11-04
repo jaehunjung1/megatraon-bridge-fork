@@ -22,11 +22,62 @@ import random
 from pathlib import Path
 from typing import Any, Dict, List
 
+import jsonlines
 from datasets import concatenate_datasets, load_dataset
 
 from megatron.bridge.utils.path_utils import resolve_path
+from tqdm import tqdm
 
 from .token_utils import json2token
+
+
+def make_custom_dataset(
+    path_or_dataset: str, split: str = "train", **kwargs
+) -> List[Dict[str, Any]]:
+    from datasets import Dataset, Image
+
+    if isinstance(path_or_dataset, str):
+        path_or_dataset = Path(path_or_dataset)
+        if not path_or_dataset.exists():
+            raise FileNotFoundError()
+
+    with jsonlines.open(path_or_dataset) as f:
+        samples = list(f)
+        ds = Dataset.from_list(samples).cast_column("images", [Image(decode=True)])
+
+    out_samples = []
+    for sample in tqdm(ds, desc="Loading custom dataset"):
+        system_prompt = "/think"
+        system_content = {"type": "text", "text": system_prompt}
+
+        image_content = [{"type": "image", "image": image} for image in sample["images"]]
+        user_prompt = sample["messages"][0]["content"].replace("<image>", "")
+        user_content = image_content + [{"type": "text", "text": user_prompt}]
+        assert sample["messages"][0]["role"] == "user", "First role in dataset messages is not `user`."
+
+        assistant_text = sample["messages"][1]["content"]
+        assistant_content = [{"type": "text", "text": assistant_text}]
+        assert sample["messages"][1]["role"] == "assistant", "Second role in dataset messages is not `assistant`."
+
+
+        out_samples.append({
+            "conversation": [
+                {
+                    "role": "system",
+                    "content": system_content,
+                },
+                {
+                    "role": "user",
+                    "content": user_content,
+                },
+                {
+                    "role": "assistant",
+                    "content": assistant_content,
+                }
+            ]
+        })
+
+    return out_samples
 
 
 def make_rdr_dataset(
