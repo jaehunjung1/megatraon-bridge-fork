@@ -81,8 +81,18 @@ class TestGemmaConversion:
             print(f"Before save - {name}: {param.dtype}")
             break  # Just check the first parameter
 
-        # Download and save tokenizer from a reference Gemma model directly from Hugging Face
-        tokenizer = GemmaTokenizer.from_pretrained("google/gemma-2b")
+        # Download and save tokenizer from a reference Gemma model
+        # We use the smallest available Gemma model for tokenizer artifacts
+        # First try to load from pre-mounted test data, then fall back to HuggingFace download
+        pre_downloaded_path = "/home/TestData/megatron_bridge/tokenizers/google/gemma-2b"
+        # Try loading from pre-downloaded location first
+        if Path(pre_downloaded_path).exists():
+            print(f"Loading tokenizer from pre-downloaded path: {pre_downloaded_path}")
+            tokenizer = GemmaTokenizer.from_pretrained(pre_downloaded_path)
+        else:
+            # Fall back to downloading from HuggingFace
+            print("Pre-downloaded tokenizer not found, attempting to download from HuggingFace")
+            tokenizer = GemmaTokenizer.from_pretrained("google/gemma-2b")
         tokenizer.save_pretrained(model_dir)
 
         # Save model and config to directory
@@ -192,8 +202,8 @@ class TestGemmaConversion:
             "-m",
             "coverage",
             "run",
-            "--data-file=/opt/Megatron-Bridge/.coverage",
-            "--source=/opt/Megatron-Bridge/",
+            "--data-file=/workspace/.coverage",
+            "--source=/workspace/",
             "--parallel-mode",
             "examples/conversion/hf_megatron_roundtrip_multi_gpu.py",
             "--hf-model-id",

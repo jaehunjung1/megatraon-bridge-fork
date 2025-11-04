@@ -21,7 +21,7 @@ from typing import Any, Callable, NamedTuple, Optional
 import torch
 from megatron.core.config import set_experimental_flag
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig, finalize_model_grads
-from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
+from megatron.core.distributed import FullyShardedDataParallel as megatron_FSDP
 from megatron.core.optimizer import MegatronOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.rerun_state_machine import RerunDataIterator
@@ -42,12 +42,7 @@ from megatron.bridge.training.optim import setup_optimizer
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log, setup_logging
-from megatron.bridge.training.utils.weight_decay_utils import get_no_weight_decay_cond
 from megatron.bridge.utils.common_utils import print_rank_0, get_rank_safe
-from megatron.bridge.training.tensor_inspect import (
-    finalize_tensor_inspect_post_model_initialization,
-    initialize_tensor_inspect_pre_model_initialization,
-)
 
 
 
@@ -166,9 +161,6 @@ def setup(
     timers("tokenizer-setup").stop()
     barrier_and_log("after tokenizer is built")
 
-    # Initialize NVIDIA DLFw Inspect early (this must happen before TE modules are constructed)
-    initialize_tensor_inspect_pre_model_initialization(cfg.tensor_inspect)
-
     # Model, optimizer, and learning rate.
     timers("model-and-optimizer-setup", log_level=0).start(barrier=True)
 
@@ -187,16 +179,11 @@ def setup(
     )
     cfg.model.timers = timers
     cfg.optimizer.timers = timers
-    no_weight_decay_cond = get_no_weight_decay_cond(
-        cfg.scheduler.no_weight_decay_cond_type,
-        default_skip_embedding_weight_decay=cfg.model.embedding_init_method_std is not None,
-    )
     optimizer, scheduler = setup_optimizer(
         optimizer_config=cfg.optimizer,
         scheduler_config=cfg.scheduler,
         model=model,
         use_gloo_process_groups=cfg.dist.use_gloo_process_groups,
-        no_weight_decay_cond=no_weight_decay_cond,
     )
     timers("model-and-optimizer-setup").stop()
     barrier_and_log("after model, optimizer, and learning rate scheduler are built")
@@ -209,6 +196,11 @@ def setup(
             # This is switched off here in order to load these states from the checkpoint
             cfg.checkpoint.finetune = False
     else:
+        # Validate the supplied pretrained checkpoint path when PEFT is not used.
+        if cfg.checkpoint.pretrained_checkpoint is not None and not checkpoint_exists(cfg.checkpoint.pretrained_checkpoint):
+            raise ValueError(
+                f"Invalid pretrained checkpoint directory found: {cfg.checkpoint.pretrained_checkpoint}"
+            )
         should_load_checkpoint = (cfg.checkpoint.load is not None and checkpoint_exists(cfg.checkpoint.load)) or (cfg.checkpoint.pretrained_checkpoint is not None and checkpoint_exists(cfg.checkpoint.pretrained_checkpoint))
 
     if should_load_checkpoint:
@@ -223,15 +215,6 @@ def setup(
         )
         timers("load-checkpoint").stop(barrier=True)
         timers.log(["load-checkpoint"])
-
-    # Finalize NVIDIA DLFw Inspect after model is built (attach loggers, module names, parallelism groups)
-    finalize_tensor_inspect_post_model_initialization(
-        cfg.tensor_inspect,
-        model,
-        state.tensorboard_logger,
-        state.wandb_logger,
-        current_training_step=state.train_state.step,
-    )
 
     _update_model_config_funcs(
         model,
@@ -360,7 +343,6 @@ def _create_peft_pre_wrap_hook(cfg: ConfigContainer, state: GlobalState) -> Call
             opt_param_scheduler=None,  # Don't load scheduler - will be created after PEFT
             checkpointing_context={},
             skip_load_to_model_and_opt=False,
-            ignore_ckpt_step=True,  # ckpt_step applies only to adapter checkpoints, not pretrained base model
         )
         state.timers("load-pretrained-checkpoint").stop(barrier=True)
         state.timers.log(["load-pretrained-checkpoint"])

@@ -20,13 +20,11 @@ ConfigContainer:
     cross_entropy_fusion_impl: "te"
     moe_router_fusion: true
     recompute_granularity: "selective"
+    pipeline_model_parallel_layout: "Et|(tt|)*30mL"
 
   train:
-    train_iters: 100
+    train_iters: 25
     eval_iters: 0
-  
-  scheduler:
-    lr_warmup_iters: 10
 
   rerun_state_machine:
     check_for_nan_in_loss: false
@@ -84,17 +82,19 @@ perf_matrix:
         seq_length: 4096
         mbs: 1
         gbs: 2048
-        tp: 1
+        tp: 2
         pp: 16
         cp: 1
         vp: null
         ep: 8
         etp: 1
         use_megatron_fsdp: false
-        cuda_graphs: false
       bf16:
+        cuda_graphs: false
       fp8_cs:
+        cuda_graphs: true
       fp8_mx:
+        cuda_graphs: true
   gb200:
     num_gpus_256:
       common:
@@ -105,7 +105,7 @@ perf_matrix:
         tp: 1
         pp: 4
         cp: 1
-        vp: 4
+        vp: 8
         ep: 64
         etp: 1
         use_megatron_fsdp: false

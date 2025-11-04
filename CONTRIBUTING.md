@@ -6,9 +6,31 @@ Thanks for your interest in contributing to Megatron-Bridge!
 
 You can either follow the steps below to set up the environment from scratch, or use the [NeMo Framework container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo/tags), which provides a pre-built environment and makes these steps unnecessary.
 
-### Development Container
+### Local workstation
 
-For containerized development, use our Dockerfile for building your own container:
+#### Installing Cuda Toolkit
+
+Please see these [instructions](https://developer.nvidia.com/cudnn-downloads) for installing cuDNN for your target platform. You can check if CUDA toolkit and cuDNN are installed with:
+
+```bash
+dpkg -l | grep 'cuda-toolkit'
+dpkg -l | grep 'cudnn.*cuda'
+```
+
+#### Syncing the Python environment
+
+Megatron-Bridge uses [uv](https://docs.astral.sh/uv/) for package management.
+
+You can configure uv with the following commands:
+
+```bash
+uv sync --only-group build  # Installs build dependencies required by TransformerEngine
+uv sync
+```
+
+### Alternative: Development Container
+
+For containerized development, use our Dockerfile for building your own container. There are three flavors: `INFERENCE_FRAMEWORK=inframework`, `INFERENCE_FRAMEWORK=trtllm` and `INFERENCE_FRAMEWORK=vllm`:
 
 ```bash
 docker build \

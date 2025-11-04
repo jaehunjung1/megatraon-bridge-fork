@@ -34,7 +34,6 @@ def run_pretrain_recipe_test(
     tmp_path: Path,
     tensor_parallelism: Optional[int] = None,
     pipeline_parallelism: Optional[int] = None,
-    expert_parallelism: Optional[int] = None,
     model_overrides: Optional[dict] = None,
 ):
     """
@@ -52,8 +51,6 @@ def run_pretrain_recipe_test(
         tmp_path: Temporary directory for test outputs
         tensor_parallelism: Override tensor parallelism (None = use recipe default)
         pipeline_parallelism: Override pipeline parallelism (None = use recipe default)
-        expert_parallelism: Override expert parallelism (None = use recipe default)
-        model_overrides: Optional mapping of model attribute overrides to apply
     """
     initialize_distributed()
     shared_base_dir = broadcast_path(tmp_path)
@@ -62,18 +59,14 @@ def run_pretrain_recipe_test(
         config: ConfigContainer = config_func(
             dir=str(shared_base_dir), name=f"{recipe_name}_functional_test", mock=True
         )
-        # Keep runs short and consistent across tests
         config.train.train_iters = 10
         config.train.eval_interval = 5
         config.train.eval_iters = 2
-        # Standardize batch sizes for functional tests
-        config.train.micro_batch_size = 1
-        config.train.global_batch_size = 8
         config.scheduler.lr_warmup_iters = 2
         test_seq_length = 512
         config.model.seq_length = test_seq_length
         config.dataset.sequence_length = test_seq_length
-        config.train.global_batch_size = 8
+
         # Keep dataloader light-weight for CI
         if hasattr(config.dataset, "pin_memory"):
             config.dataset.pin_memory = False
@@ -98,17 +91,18 @@ def run_pretrain_recipe_test(
         if tensor_parallelism is not None:
             if hasattr(config.model, "tensor_model_parallel_size"):
                 config.model.tensor_model_parallel_size = tensor_parallelism
+            else:
+                setattr(config.model, "tensor_parallelism", tensor_parallelism)
         if pipeline_parallelism is not None:
             if hasattr(config.model, "pipeline_model_parallel_size"):
                 config.model.pipeline_model_parallel_size = pipeline_parallelism
-        if expert_parallelism is not None:
-            if hasattr(config.model, "expert_model_parallel_size"):
-                config.model.expert_model_parallel_size = expert_parallelism
+            else:
+                setattr(config.model, "pipeline_parallelism", pipeline_parallelism)
 
-        # Apply any model-specific overrides provided by the caller
+        # Apply any model-level overrides (e.g., shrink layer/expert counts for CI)
         if model_overrides:
-            for attribute_name, attribute_value in model_overrides.items():
-                setattr(config.model, attribute_name, attribute_value)
+            for key, value in model_overrides.items():
+                setattr(config.model, key, value)
 
         pretrain(config, forward_step)
 
@@ -146,8 +140,6 @@ def run_pretrain_vl_recipe_test(
     tmp_path: Path,
     tensor_parallelism: Optional[int] = None,
     pipeline_parallelism: Optional[int] = None,
-    model_overrides: Optional[dict] = None,
-    forward_step_func: Optional[Callable] = None,
 ):
     """
     VLM variant of run_pretrain_recipe_test that uses the VLM forward step.
@@ -155,11 +147,8 @@ def run_pretrain_vl_recipe_test(
     Mirrors the llama/qwen functional test utility but routes through
     megatron.bridge.training.vlm_step.forward_step.
     """
-    if forward_step_func is None:
     # Import locally to avoid loading VLM stack for non-VL tests
-        from megatron.bridge.training.vlm_step import forward_step as vlm_forward_step
-    else:
-        vlm_forward_step = forward_step_func
+    from megatron.bridge.training.vlm_step import forward_step as vlm_forward_step
 
     initialize_distributed()
     shared_base_dir = broadcast_path(tmp_path)
@@ -169,13 +158,9 @@ def run_pretrain_vl_recipe_test(
         config: ConfigContainer = config_func(
             dir=str(shared_base_dir), name=f"{recipe_name}_functional_test", dataset_type="mock"
         )
-        # Keep runs short and consistent across tests
-        config.train.train_iters = 10
-        config.train.eval_interval = 5
-        config.train.eval_iters = 2
-        # Standardize batch sizes for functional tests
-        config.train.micro_batch_size = 1
-        config.train.global_batch_size = 8
+        config.train.train_iters = 2
+        config.train.eval_interval = 1
+        config.train.eval_iters = 1
         config.scheduler.lr_warmup_iters = 1
         test_seq_length = 1024
         config.model.seq_length = test_seq_length
@@ -204,11 +189,6 @@ def run_pretrain_vl_recipe_test(
             config.model.tensor_parallelism = tensor_parallelism
         if pipeline_parallelism is not None:
             config.model.pipeline_parallelism = pipeline_parallelism
-
-        # Apply any model-specific overrides provided by the caller
-        if model_overrides:
-            for attribute_name, attribute_value in model_overrides.items():
-                setattr(config.model, attribute_name, attribute_value)
 
         pretrain(config, vlm_forward_step)
 

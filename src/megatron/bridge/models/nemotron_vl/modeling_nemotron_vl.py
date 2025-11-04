@@ -19,7 +19,10 @@ from torch import Tensor
 
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.models.multimodal.llava_model import LLaVAModel
-from megatron.bridge.models.nemotron_vl.nemotron_vl_provider import NemotronNano12Bv2VLModelProvider
+
+# Local imports are intentionally placed at the bottom to avoid circular deps
+if True:  # noqa: SIM102 – block to allow conditional import without else
+    from .nemotron_vl_provider import NemotronNano12Bv2VLModelProvider  # pylint: disable=cyclic-import
 
 
 class NemotronVLModel(MegatronModule):

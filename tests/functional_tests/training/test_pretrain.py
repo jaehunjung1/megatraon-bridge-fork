@@ -66,7 +66,7 @@ class TestPretrain:
             global_batch_size = 8
             micro_batch_size = 1
             seq_length = 512
-            total_iters = 10
+            total_iters = 100
 
             model_cfg = Llama32ModelProvider1B(
                 tensor_model_parallel_size=1,
@@ -79,7 +79,6 @@ class TestPretrain:
                 seq_length=seq_length,
                 make_vocab_size_divisible_by=128,
                 vocab_size=None,
-                num_layers=1,
             )
 
             # Config Container
@@ -87,7 +86,7 @@ class TestPretrain:
                 model=model_cfg,
                 train=TrainingConfig(
                     train_iters=total_iters,
-                    eval_interval=5,
+                    eval_interval=50,
                     eval_iters=2,
                     global_batch_size=global_batch_size,
                     micro_batch_size=micro_batch_size,
@@ -186,7 +185,7 @@ class TestPretrain:
             global_batch_size = 8
             micro_batch_size = 1
             seq_length = 512
-            total_iters = 10
+            total_iters = 100
 
             # Create model config with VPP
             model_cfg = Llama32ModelProvider1B(
@@ -239,7 +238,7 @@ class TestPretrain:
                 model=model_cfg,
                 train=TrainingConfig(
                     train_iters=total_iters,
-                    eval_interval=5,
+                    eval_interval=50,
                     eval_iters=2,
                     global_batch_size=global_batch_size,
                     micro_batch_size=micro_batch_size,

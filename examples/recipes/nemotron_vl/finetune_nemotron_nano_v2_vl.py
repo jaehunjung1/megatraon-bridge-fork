@@ -15,6 +15,12 @@
 
 """
 Finetune Nemotron Nano V2 VL with YAML and CLI Configuration Overrides.
+
+This script mirrors the `pretrain_nemotron_nano_v2_vl.py` flow but invokes the
+`finetune` entry-point instead of `pretrain`. All CLI flags that apply to the
+pre-training script remain the same; an additional `--pretrained-checkpoint`
+flag specifies the Megatron-Bridge checkpoint (or HuggingFace model) to start
+from.
 """
 
 from __future__ import annotations
@@ -29,9 +35,9 @@ from typing import Tuple
 import torch
 from omegaconf import OmegaConf
 
+from megatron.bridge.recipes.nemotron_nano_v2_vl_step import forward_step
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.finetune import finetune
-from megatron.bridge.training.llava_step import forward_step
 from megatron.bridge.training.utils.omegaconf_utils import (
     apply_overrides,
     create_omegaconf_dict_config,
@@ -65,8 +71,8 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--hf-model-path",
         type=str,
-        default="nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
-        help="Path to the HuggingFace model to load weights from. Default: nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        default="nvidia/Nemotron-Nano-12B-v2-VL-BF16",
+        help="Path to the HuggingFace model to load weights from. Default: nvidia/Nemotron-Nano-12B-v2-VL-BF16",
     )
     # Finetune-specific flags
     parser.add_argument(
@@ -142,7 +148,6 @@ def main() -> None:
         cfg.print_yaml()
         logger.info("--------------------------------------------")
 
-    # Nemotron Nano V2 VL uses the LLaVaModel class for the model, so we use the llava_step.forward_step function.
     finetune(config=cfg, forward_step_func=forward_step)
 
     if torch.distributed.is_initialized():

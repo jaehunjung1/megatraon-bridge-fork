@@ -101,14 +101,7 @@ class TestTransformerLayerSpecRouter:
         _get_transformer_layer_spec(mock_args, True, False)
 
         mock_te_spec_func.assert_called_once_with(
-            num_experts=None,
-            moe_grouped_gemm=False,
-            qk_layernorm=False,
-            multi_latent_attention=False,
-            linear_attention_type=None,
-            moe_use_legacy_grouped_gemm=False,
-            qk_l2_norm=False,
-            use_kitchen=False,
+            None, False, False, False, False, qk_l2_norm=False, use_kitchen=False
         )
 
     @patch("megatron.bridge.training.mlm_compat.model.get_gpt_layer_local_spec")
@@ -117,14 +110,7 @@ class TestTransformerLayerSpecRouter:
         _get_transformer_layer_spec(mock_args, False, True)
 
         mock_local_spec_func.assert_called_once_with(
-            num_experts=None,
-            moe_grouped_gemm=False,
-            qk_layernorm=False,
-            multi_latent_attention=False,
-            linear_attention_type=None,
-            moe_use_legacy_grouped_gemm=False,
-            normalization="LayerNorm",
-            use_kitchen=True,
+            None, False, False, False, False, normalization="LayerNorm", use_kitchen=True
         )
 
 

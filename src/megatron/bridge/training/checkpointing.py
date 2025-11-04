@@ -47,19 +47,11 @@ from megatron.core.optimizer import MegatronOptimizer
 from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.core.transformer import MegatronModule
 from megatron.core.utils import unwrap_model
-from modelopt.torch.opt.plugins import (
-    restore_modelopt_state,
-    restore_sharded_modelopt_state,
-    save_modelopt_state,
-    save_sharded_modelopt_state,
-)
 
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.config import CheckpointConfig
 from megatron.bridge.training.state import GlobalState, TrainState
-from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 from megatron.bridge.training.utils import wandb_utils
 from megatron.bridge.training.utils.checkpoint_utils import (
     checkpoint_exists,
@@ -96,6 +88,20 @@ try:
     HAVE_MEGATRON_FSDP = True
 except ImportError:
     HAVE_MEGATRON_FSDP = False
+
+
+# [ModelOpt]: Import
+try:
+    from modelopt.torch.opt.plugins import (
+        restore_modelopt_state,
+        restore_sharded_modelopt_state,
+        save_modelopt_state,
+        save_sharded_modelopt_state,
+    )
+
+    has_nvidia_modelopt = True
+except Exception:
+    has_nvidia_modelopt = False
 
 TRACKER_PREFIX = "latest"
 _CHECKPOINT_VERSION = None
@@ -542,7 +548,7 @@ def save_checkpoint(
         )
 
     state_dict = generate_state_dict(
-        ckpt_cfg,
+        cfg.checkpoint,
         model,
         optimizer,
         opt_param_scheduler,
@@ -611,13 +617,15 @@ def save_checkpoint(
                 content_metadata=sharded_sd_metadata,
             )
             # [ModelOpt]: save sharded modelopt_state
-            save_sharded_modelopt_state(model, checkpoint_name, (ckpt_cfg.ckpt_format, 1))
+            if has_nvidia_modelopt:
+                save_sharded_modelopt_state(model, checkpoint_name, (ckpt_cfg.ckpt_format, 1))
     else:
         # [ModelOpt]: Inject modelopt_state into state_dict
-        if ckpt_type == CheckpointType.LOCAL:
-            print_rank_0("WARNING: Local checkpointing does not support nvidia_modelopt.")
-        else:  # GLOBAL checkpoint type
-            save_modelopt_state(model, state_dict)
+        if has_nvidia_modelopt:
+            if ckpt_type == CheckpointType.LOCAL:
+                print_rank_0("WARNING: Local checkpointing does not support nvidia_modelopt.")
+            else:  # GLOBAL checkpoint type
+                save_modelopt_state(model, state_dict)
 
         end_ckpt = time()
         logger.debug(f"rank: {rank}, takes {end_ckpt - start_ckpt} to prepare state dict for ckpt ")
@@ -689,12 +697,6 @@ def save_checkpoint(
                         f.write(str(train_state.step))
 
                 cfg.to_yaml(config_filename)
-
-                # Save tokenizer files for self-contained checkpoints (if enabled)
-                if ckpt_cfg.save_tokenizer_assets:
-                    tokenizer_instance = getattr(cfg.dataset, "tokenizer", None) if cfg.dataset else None
-                    if tokenizer_instance is not None:
-                        save_tokenizer_assets(tokenizer_instance, cfg.tokenizer, checkpoint_name)
 
                 tp_rank = (tensor_rank if tensor_rank is not None else mpu.get_tensor_model_parallel_rank()) + 1
                 tp_world_size = mpu.get_tensor_model_parallel_world_size()
@@ -845,141 +847,6 @@ def maybe_save_dataloader_state(train_iterator: Any, iteration: int, dataloader_
     dataloader_save_dict = {}
     dataloader_save_dict["dataloader_state_dict"] = train_dataloader_state_dict
     torch.save(dataloader_save_dict, data_state_save_path)
-
-
-def save_tokenizer_assets(
-    tokenizer: MegatronTokenizer,
-    tokenizer_config: TokenizerConfig,
-    checkpoint_path: str,
-) -> None:
-    """Save tokenizer files to the checkpoint directory.
-
-    Always saves tokenizer files to ensure checkpoints are self-contained
-    and portable. Handles both HuggingFace tokenizers and file-based tokenizers.
-    Compatible with MultiStorageClient for cloud storage support.
-
-    Args:
-        tokenizer: The tokenizer instance to save.
-        tokenizer_config: The tokenizer configuration (used for file-based tokenizers).
-        checkpoint_path: The checkpoint directory path.
-    """
-    if tokenizer is None:
-        return
-
-    # Only rank 0 saves tokenizer files
-    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-    if rank != 0:
-        return
-
-    def resolve_path(path_str: str) -> str:
-        """Resolve relative paths to absolute paths."""
-        if not path_str:
-            return path_str
-        path_obj = Path(path_str)
-        if path_obj.is_absolute():
-            return path_str
-        # Resolve relative to current working directory
-        return str(path_obj.resolve())
-
-    try:
-        # Check if MultiStorageClient is enabled
-        if MultiStorageClientFeature.is_enabled():
-            msc = MultiStorageClientFeature.import_package()
-            checkpoint_path_obj = msc.Path(checkpoint_path)
-            tokenizer_dir = checkpoint_path_obj / "tokenizer"
-            tokenizer_dir.mkdir(parents=True, exist_ok=True)
-            use_msc = True
-        else:
-            tokenizer_dir = os.path.join(checkpoint_path, "tokenizer")
-            os.makedirs(tokenizer_dir, exist_ok=True)
-            use_msc = False
-
-        tokenizer_type = tokenizer_config.tokenizer_type
-
-        # Handle HuggingFace and Multimodal tokenizers
-        if tokenizer_type in ("HuggingFaceTokenizer", "MultimodalTokenizer"):
-            if use_msc:
-                import tempfile
-
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    if hasattr(tokenizer, "save_pretrained"):
-                        tokenizer.save_pretrained(tmp_dir)
-                    elif hasattr(tokenizer, "_tokenizer") and hasattr(tokenizer._tokenizer, "save_pretrained"):
-                        tokenizer._tokenizer.save_pretrained(tmp_dir)
-                    else:
-                        logger.debug(f"{tokenizer_type} does not support save_pretrained(), skipping tokenizer save")
-                        return
-
-                    logger.debug(f"Saving {tokenizer_type} files to {tokenizer_dir}")
-                    for filename in os.listdir(tmp_dir):
-                        src_path = os.path.join(tmp_dir, filename)
-                        if os.path.isfile(src_path):
-                            dest_path = tokenizer_dir / filename
-                            with open(src_path, "rb") as src_f:
-                                with msc.open(str(dest_path), "wb") as dest_f:
-                                    dest_f.write(src_f.read())
-            else:
-                logger.debug(f"Saving {tokenizer_type} files to {tokenizer_dir}")
-                if hasattr(tokenizer, "save_pretrained"):
-                    tokenizer.save_pretrained(tokenizer_dir)
-                elif hasattr(tokenizer, "_tokenizer") and hasattr(tokenizer._tokenizer, "save_pretrained"):
-                    tokenizer._tokenizer.save_pretrained(tokenizer_dir)
-            return
-
-        # Handle file-based tokenizers - resolve all paths
-        files_to_copy = []
-
-        if tokenizer_type in ("BertWordPieceLowerCase", "BertWordPieceCase"):
-            if tokenizer_config.vocab_file:
-                resolved_path = resolve_path(tokenizer_config.vocab_file)
-                files_to_copy.append(("vocab_file", resolved_path, "vocab.txt"))
-
-        elif tokenizer_type == "GPT2BPETokenizer":
-            if tokenizer_config.vocab_file:
-                resolved_path = resolve_path(tokenizer_config.vocab_file)
-                files_to_copy.append(("vocab_file", resolved_path, "vocab.json"))
-            if tokenizer_config.merge_file:
-                resolved_path = resolve_path(tokenizer_config.merge_file)
-                files_to_copy.append(("merge_file", resolved_path, "merges.txt"))
-
-        elif tokenizer_type in ("SentencePieceTokenizer", "GPTSentencePieceTokenizer", "Llama2Tokenizer"):
-            if tokenizer_config.tokenizer_model:
-                resolved_path = resolve_path(tokenizer_config.tokenizer_model)
-                files_to_copy.append(("tokenizer_model", resolved_path, "tokenizer.model"))
-
-        elif tokenizer_type == "TikTokenizer":
-            if tokenizer_config.tokenizer_model:
-                resolved_path = resolve_path(tokenizer_config.tokenizer_model)
-                files_to_copy.append(("tokenizer_model", resolved_path, "tokenizer.json"))
-
-        elif tokenizer_type == "NullTokenizer":
-            logger.debug(f"{tokenizer_type} requires no file artifacts")
-            return
-
-        # Copy the files
-        if files_to_copy:
-            logger.debug(f"Saving {tokenizer_type} files to {tokenizer_dir}")
-            for config_attr, source_path, dest_filename in files_to_copy:
-                if source_path and os.path.exists(source_path):
-                    if use_msc:
-                        dest_path = tokenizer_dir / dest_filename
-                        with open(source_path, "rb") as src_f:
-                            with msc.open(str(dest_path), "wb") as dest_f:
-                                dest_f.write(src_f.read())
-                        logger.debug(f"Copied {config_attr}: {source_path} -> {dest_path}")
-                    else:
-                        dest_path = os.path.join(tokenizer_dir, dest_filename)
-                        shutil.copy2(source_path, dest_path)
-                        logger.debug(f"Copied {config_attr}: {source_path} -> {dest_path}")
-                else:
-                    logger.debug(f"{config_attr} not found at resolved path: {source_path}")
-
-    except Exception as e:
-        if get_rank_safe() == 0:
-            logger.error(f"Failed to save tokenizer files: {e}")
-            import traceback
-
-            logger.error(traceback.format_exc())
 
 
 def _generate_model_state_dict(
@@ -1141,8 +1008,8 @@ def _load_model_weights_from_checkpoint(
     print_rank_0(f"sharded_state_dict metadata loaded from the checkpoint: {sharded_sd_metadata}")
     model_sd_kwargs = dict(metadata=sharded_sd_metadata)
 
-    # [ModelOpt]: Restore state
-    restore_modelopt_state(model, state_dict)
+    if has_nvidia_modelopt:
+        restore_modelopt_state(model, state_dict)
 
     model = unwrap_model(model)
     sharded_state_dict = _generate_model_state_dict(model, model_sd_kwargs)
@@ -1250,7 +1117,6 @@ def _load_checkpoint_from_path(
     strict: bool = True,
     checkpointing_context: Optional[dict[str, Any]] = None,
     skip_load_to_model_and_opt: bool = False,
-    ignore_ckpt_step: bool = False,
 ) -> tuple[int, int]:
     """Load a checkpoint from a given path.
 
@@ -1264,8 +1130,6 @@ def _load_checkpoint_from_path(
         checkpointing_context: Dictionary to store context across loads (e.g., strategies).
         skip_load_to_model_and_opt: If True, only loads metadata (iteration, rng) but
                                       skips loading state into model and optimizer modules.
-        ignore_ckpt_step: If True, ignores the ckpt_step config and loads latest checkpoint.
-                          Used when loading pretrained checkpoints in PEFT scenarios.
 
     Returns:
         A tuple containing:
@@ -1279,11 +1143,7 @@ def _load_checkpoint_from_path(
     # Step 1: Load base checkpoint with rank0=True (torch_dist only)
     if ckpt_format == "torch_dist":
         state_dict, checkpoint_name, release, ckpt_type = _load_base_checkpoint(
-            load_dir,
-            cfg.checkpoint,
-            rank0=True,
-            checkpointing_context=checkpointing_context,
-            ignore_ckpt_step=ignore_ckpt_step,
+            load_dir, cfg.checkpoint, rank0=True, checkpointing_context=checkpointing_context
         )
 
     # Step 2: Initialize scaffolding
@@ -1385,12 +1245,13 @@ def _load_checkpoint_from_path(
         model_sd_kwargs = dict(metadata=sharded_sd_metadata)
 
         # ModelOpt restoration
-        if ckpt_type == CheckpointType.LOCAL:
-            print_rank_0("WARNING: Local checkpointing does not support nvidia_modelopt.")
-        elif ckpt_type == CheckpointType.GLOBAL:
-            restore_modelopt_state(model, state_dict)
-        else:
-            restore_sharded_modelopt_state(model, checkpoint_name)
+        if has_nvidia_modelopt:
+            if ckpt_type == CheckpointType.LOCAL:
+                print_rank_0("WARNING: Local checkpointing does not support nvidia_modelopt.")
+            elif ckpt_type == CheckpointType.GLOBAL:
+                restore_modelopt_state(model, state_dict)
+            else:
+                restore_sharded_modelopt_state(model, checkpoint_name)
 
         # Build sharded state dict for loading
         with contextlib.ExitStack() as stack:
@@ -1483,12 +1344,7 @@ def _load_checkpoint_from_path(
 
     # Load the checkpoint
     state_dict, checkpoint_name, release, ckpt_type = _load_base_checkpoint(
-        load_dir,
-        cfg.checkpoint,
-        rank0=False,
-        checkpointing_context=checkpointing_context,
-        ignore_ckpt_step=ignore_ckpt_step,
-        **load_kwargs,
+        load_dir, cfg.checkpoint, rank0=False, checkpointing_context=checkpointing_context, **load_kwargs
     )
 
     # Checkpoint not loaded
@@ -1745,54 +1601,6 @@ def _is_model_section(section_key: str) -> bool:
     return is_single_model or is_pipeline_model
 
 
-def _resolve_checkpoint_iteration(load_dir: str | None, ckpt_step_override: int | None) -> tuple[int, bool]:
-    """Resolve which checkpoint iteration to load.
-
-    This function determines the checkpoint iteration by:
-    1. If ckpt_step is specified, use it directly (no file I/O needed)
-    2. Otherwise, read from the tracker file (latest_train_state.pt or legacy format)
-
-    Args:
-        load_dir: Base checkpoint directory.
-        ckpt_step_override: User-specified iteration override (from ckpt_step config).
-
-    Returns:
-        Tuple of (iteration, release) where iteration=-1 means no checkpoint found.
-    """
-    # If user specified ckpt_step, validate the checkpoint directory exists
-    if ckpt_step_override is not None:
-        # Note: load_dir is guaranteed to be non-None by CheckpointConfig.finalize()
-        checkpoint_dir = get_checkpoint_name(load_dir, ckpt_step_override, release=False)
-        if not file_exists(checkpoint_dir):
-            raise FileNotFoundError(
-                f"ckpt_step={ckpt_step_override} specified but checkpoint directory does not exist: {checkpoint_dir}\n"
-                f"Available checkpoints can be listed with: ls {load_dir}/iter_*"
-            )
-
-        print_rank_0(f"Loading checkpoint from iteration {ckpt_step_override} (specified via ckpt_step)")
-        return ckpt_step_override, False
-
-    # Otherwise, read from tracker file to find latest checkpoint
-    iteration, release = -1, False
-
-    if load_dir is None:
-        return iteration, release
-
-    # Try Bridge format first (latest_train_state.pt)
-    tracker_filename = get_checkpoint_train_state_filename(load_dir, prefix=TRACKER_PREFIX)
-    if file_exists(tracker_filename):
-        train_state = read_train_state(tracker_filename)
-        iteration = train_state.step
-    else:
-        # Fallback to legacy Megatron-LM format (latest_checkpointed_iteration.txt)
-        legacy_tracker_filename = get_checkpoint_tracker_filename(load_dir)
-        if file_exists(legacy_tracker_filename):
-            print_rank_0(f"Loading from legacy Megatron-LM checkpoint format: {legacy_tracker_filename}")
-            iteration, release = read_metadata(legacy_tracker_filename)
-
-    return iteration, release
-
-
 def _transpose_first_dim(
     t: torch.Tensor, num_splits: int, num_splits_first: bool, model: torch.nn.Module
 ) -> torch.Tensor:
@@ -1938,21 +1746,8 @@ def _load_base_checkpoint(
     rank0: bool = False,
     sharded_state_dict: Optional[dict[str, Any]] = None,
     checkpointing_context: Optional[dict[str, Any]] = None,
-    ignore_ckpt_step: bool = False,
 ) -> tuple[Optional[dict[str, Any]], str, bool, Optional[CheckpointType]]:
-    """Load the base state_dict from the given directory.
-
-    Args:
-        load_dir: Directory containing the checkpoint.
-        ckpt_cfg: Checkpoint configuration.
-        rank0: If True, only load rank 0 metadata.
-        sharded_state_dict: State dict for distributed loading.
-        checkpointing_context: Context for caching strategies.
-        ignore_ckpt_step: If True, ignore ckpt_step and load latest. Used for pretrained checkpoints.
-
-    Returns:
-        Tuple of (state_dict, checkpoint_name, release, ckpt_type).
-    """
+    """Load the base state_dict from the given directory."""
     # Try to load non-persistent checkpoint first
     non_persistent_global_dir = (
         ckpt_cfg.non_persistent_global_ckpt_dir
@@ -1962,18 +1757,21 @@ def _load_base_checkpoint(
     non_persistent_iteration = _get_non_persistent_iteration(
         non_persistent_global_dir, ckpt_cfg.non_persistent_ckpt_type, checkpointing_context
     )
-    # Resolve which iteration to load
-    iteration, release = _resolve_checkpoint_iteration(
-        load_dir=load_dir,
-        ckpt_step_override=None if ignore_ckpt_step else ckpt_cfg.ckpt_step,
-    )
-
+    iteration, release = -1, False
     tracker_filename = "because load directory is not defined"
     if load_dir is not None:
         tracker_filename = get_checkpoint_train_state_filename(load_dir, prefix=TRACKER_PREFIX)
-        if not file_exists(tracker_filename):
-            tracker_filename = get_checkpoint_tracker_filename(load_dir)
-
+        if file_exists(tracker_filename):
+            train_state = read_train_state(tracker_filename)
+            iteration = train_state.step
+            # release = train_state.release
+        else:
+            # Fallback to legacy Megatron-LM tracker file format
+            legacy_tracker_filename = get_checkpoint_tracker_filename(load_dir)
+            if file_exists(legacy_tracker_filename):
+                print_rank_0(f"Loading from legacy Megatron-LM checkpoint format: {legacy_tracker_filename}")
+                iteration, release = read_metadata(legacy_tracker_filename)
+                tracker_filename = legacy_tracker_filename  # Update for error messages
     if non_persistent_iteration != -1:  # there is a non-persistent checkpoint
         if non_persistent_iteration >= iteration:
             return _load_non_persistent_base_checkpoint(

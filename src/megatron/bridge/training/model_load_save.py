@@ -118,7 +118,7 @@ def temporary_distributed_context(backend: str = "gloo") -> Generator[None, None
         dist.destroy_process_group()
 
 
-def load_tokenizer(checkpoint_path: str, **kwargs) -> MegatronTokenizer:
+def load_tokenizer(checkpoint_path: str) -> MegatronTokenizer:
     """Create a tokenizer from a training checkpoint.
 
     Obtains tokenizer configuration from the checkpoint and builds the tokenizer.
@@ -127,9 +127,6 @@ def load_tokenizer(checkpoint_path: str, **kwargs) -> MegatronTokenizer:
     Args:
         checkpoint_path: path to an MCore distributed checkpoint directory
                           (e.g., /path/to/model/checkpoints/iter_0000001).
-        **kwargs: Overrides to the TokenizerConfig used to build the tokenizer.
-                Useful if the tokenizer assets have moved since training.
-
     """
     from megatron.bridge.training.checkpointing import (
         get_checkpoint_run_config_filename,
@@ -154,14 +151,6 @@ def load_tokenizer(checkpoint_path: str, **kwargs) -> MegatronTokenizer:
         cfg = instantiate(run_config["tokenizer"])
     else:
         cfg = _tokenizer_config_from_args(mlm_args)
-
-    for key, val in kwargs.items():
-        if hasattr(cfg, key):
-            setattr(cfg, key, val)
-        else:
-            raise AttributeError(
-                f"Attempting to set a non-existent attribute '{key}' on TokenizerConfig.\nState of TokenizerConfig before attempting this override: {cfg}"
-            )
 
     return build_tokenizer(cfg)
 
@@ -253,7 +242,7 @@ def build_and_load_model(
     from megatron.bridge.training.mlm_compat.model import _get_model, _gpt_provider, _mamba_provider
     from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 
-    if has_modelopt_state(checkpoint_path, ignore_kd_state=True):
+    if has_modelopt_state(checkpoint_path):
         if hasattr(model_cfg, "restore_modelopt_state"):
             model_cfg.restore_modelopt_state = True
 
@@ -465,22 +454,6 @@ def save_megatron_model(
         opt_param_scheduler=None,
         num_floating_point_operations_so_far=0,
     )
-
-    # Save tokenizer files separately if tokenizer config is provided
-    if tokenizer_config is not None:
-        from megatron.bridge.training.checkpointing import (
-            get_checkpoint_name,
-            save_tokenizer_assets,
-        )
-
-        # Build the tokenizer
-        tokenizer = build_tokenizer(tokenizer_config)
-
-        # Get the checkpoint name for step 0
-        checkpoint_name = get_checkpoint_name(str(path), 0, release=False)
-
-        # Save tokenizer files
-        save_tokenizer_assets(tokenizer, tokenizer_config, checkpoint_name)
 
 
 def dtype_from_str(dtype: str) -> torch.dtype:

@@ -411,7 +411,6 @@ class TestStateDictConvenienceMethods:
         assert len(tensors) > 0
         assert all(key.endswith(".weight") for key in tensors)
 
-    @pytest.mark.pleasefixme  # This test is too slow for unit tests (>0.5s)
     def test_glob_method(self, mock_model):
         """Test glob convenience method."""
         state_dict_source = mock_model.state_dict()

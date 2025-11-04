@@ -18,7 +18,6 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 from megatron.core import parallel_state
-from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.rerun_state_machine import RerunDataIterator, RerunMode, get_rerun_state_machine
@@ -26,15 +25,14 @@ from megatron.core.transformer import MegatronModule
 
 from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.config import ConfigContainer
-from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
 from megatron.bridge.training.state import GlobalState
-from megatron.bridge.training.utils.train_utils import prepare_forward_step_func
+from megatron.bridge.training.utils.train_utils import check_forward_step_func_num_args, maybe_inject_state
 from megatron.bridge.utils.common_utils import is_last_rank, print_rank_0, print_rank_last
 
 
 def evaluate(
     state: GlobalState,
-    forward_step_func: ForwardStepCallable,
+    forward_step_func: Callable,
     data_iterator: Optional[Union[RerunDataIterator, list[RerunDataIterator]]],
     model: list[MegatronModule],
     process_non_loss_data_func: Optional[Callable],
@@ -60,9 +58,8 @@ def evaluate(
             - collected_non_loss_data: Data collected by non_loss_data_func.
             - timelimit_hit: Boolean indicating if the time limit was reached.
     """
-    # Prepare forward_step_func (check signature and inject state if needed)
-    # This is done once to prevent creating new partial objects every eval iteration
-    wrapped_forward_step = prepare_forward_step_func(forward_step_func, state)
+    # Check num args to forward_step_func
+    num_fw_args = check_forward_step_func_num_args(forward_step_func)
 
     timers = state.timers
     timers("evaluate", log_level=0).start(barrier=True)
@@ -83,22 +80,16 @@ def evaluate(
     eval_num_microbatches = eval_batch_size // (state.cfg.train.micro_batch_size * state.cfg.data_parallel_size)
 
     with torch.no_grad():
+        iteration = 0
         if verbose:
             print_rank_0(f"Evaluating on {state.cfg.train.eval_iters * eval_batch_size} samples")
-
-        if state.cfg.model.cuda_graph_impl == "local" and state.cfg.model.cuda_graph_scope == "full_iteration":
-            forward_backward_func = FullCudaGraphWrapper(
-                get_forward_backward_func(), cuda_graph_warmup_steps=state.cfg.model.cuda_graph_warmup_steps
-            )
-        else:
-            forward_backward_func = get_forward_backward_func()
-
-        iteration = 0
         while iteration < state.cfg.train.eval_iters:
             iteration += 1
             if verbose:
                 print_rank_0(f"Evaluating iter {iteration}/{state.cfg.train.eval_iters}")
 
+            wrapped_forward_step = maybe_inject_state(forward_step_func, state, num_fw_args=num_fw_args)
+            forward_backward_func = get_forward_backward_func()
             # Don't care about timing during evaluation
             config.timers = None
             fault_tolerance.on_eval_step_start(state)
@@ -186,7 +177,7 @@ def evaluate(
 def evaluate_and_print_results(
     state: GlobalState,
     prefix: str,
-    forward_step_func: ForwardStepCallable,
+    forward_step_func: Callable,
     data_iterator: Optional[Union[RerunDataIterator, list[RerunDataIterator]]],
     model: list[MegatronModule],
     config: ConfigContainer,

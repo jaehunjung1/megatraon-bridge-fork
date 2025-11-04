@@ -15,18 +15,15 @@
 
 import sys
 from pathlib import Path
-from typing import Any, Dict, Generic, List, Optional, TypeVar, Union
+from typing import Dict, Generic, List, Optional, TypeVar, Union
 
 import torch
 from transformers import (
     AutoConfig,
-    AutoImageProcessor,
     AutoModelForCausalLM,
-    AutoProcessor,
     AutoTokenizer,
     GenerationConfig,
     PreTrainedTokenizer,
-    ProcessorMixin,
 )
 from transformers.generation.utils import GenerateOutput
 
@@ -120,7 +117,7 @@ class PreTrainedCausalLM(PreTrainedBase, Generic[CausalLMType]):
         ...     print(f"Prompt {i+1}: {model.decode(output, skip_special_tokens=True)}")
     """
 
-    ARTIFACTS = ["tokenizer", "processor", "image_processor"]
+    ARTIFACTS = ["tokenizer"]
     OPTIONAL_ARTIFACTS = ["generation_config"]
 
     def __init__(
@@ -196,47 +193,6 @@ class PreTrainedCausalLM(PreTrainedBase, Generic[CausalLMType]):
             tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
 
-    def _load_processor(self) -> ProcessorMixin:
-        """Lazy load and return the processor."""
-        if self.model_name_or_path is None:
-            raise ValueError("model_name_or_path must be provided to load processor")
-
-        try:
-            return AutoProcessor.from_pretrained(
-                self.model_name_or_path,
-                trust_remote_code=self.trust_remote_code,
-                **self.init_kwargs,
-            )
-        except Exception:
-            # Some VLMs might not have a processor, fall back to manual loading
-            raise ValueError(
-                f"Could not load processor for {self.model_name_or_path}. "
-                "This model might require manual processor setup."
-            )
-
-    def _load_image_processor(self) -> Optional[Any]:
-        """
-        Lazy load and return the image processor.
-        For VLMs, the image processor might be included in the processor.
-        """
-        # Check if image processor is available through processor first
-        processor = getattr(self, "_processor", None)
-        if processor is not None and hasattr(processor, "image_processor"):
-            return processor.image_processor
-
-        # Try to load image processor separately
-        if self.model_name_or_path is not None:
-            try:
-                return AutoImageProcessor.from_pretrained(
-                    self.model_name_or_path,
-                    trust_remote_code=self.trust_remote_code,
-                    **self.init_kwargs,
-                )
-            except Exception:
-                # Some VLMs include image processor only in processor
-                pass
-        return None
-
     def _load_generation_config(self) -> Optional[GenerationConfig]:
         """Load the generation config."""
         if self.model_name_or_path is not None:
@@ -249,17 +205,6 @@ class PreTrainedCausalLM(PreTrainedBase, Generic[CausalLMType]):
             except Exception:
                 # Not all models have generation configs
                 pass
-        return None
-
-    @property
-    def auto_map_model_class(self) -> Optional[str]:
-        """Get the AutoModelForCausalLM class from the config."""
-        config = self.config
-        auto_map = getattr(config, "auto_map", None)
-        if auto_map and "AutoModelForCausalLM" in auto_map:
-            auto_map_class = auto_map["AutoModelForCausalLM"]
-            return str(auto_map_class)
-
         return None
 
     @property
@@ -289,30 +234,6 @@ class PreTrainedCausalLM(PreTrainedBase, Generic[CausalLMType]):
     def tokenizer(self, value: PreTrainedTokenizer):
         """Set the tokenizer manually."""
         self._tokenizer = value
-
-    @property
-    def processor(self) -> ProcessorMixin:
-        """Lazy load and return the processor."""
-        if not hasattr(self, "_processor"):
-            self._processor = self._load_processor()
-        return self._processor
-
-    @processor.setter
-    def processor(self, value: ProcessorMixin):
-        """Set the processor manually."""
-        self._processor = value
-
-    @property
-    def image_processor(self) -> Optional[Any]:
-        """Lazy load and return the image processor."""
-        if not hasattr(self, "_image_processor"):
-            self._image_processor = self._load_image_processor()
-        return self._image_processor
-
-    @image_processor.setter
-    def image_processor(self, value: Any):
-        """Set the image processor manually."""
-        self._image_processor = value
 
     @property
     def model_name_or_path(self) -> Optional[Union[str, Path]]:

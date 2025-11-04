@@ -13,15 +13,13 @@
 # limitations under the License.
 
 import json
-import os
-import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 from transformers import AutoConfig, AutoTokenizer
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+from megatron.bridge.models.conversion.utils import get_causal_lm_class_via_auto_map
 
 
 DEEPSEEK_V3_OVERRIDES = {
@@ -64,19 +62,7 @@ class TestDeepSeekConversion:
 
         # Fallback to a generic small model; for conversion flows we only need keys/config
         # Some environments may not have DeepSeek classes; we just ensure a valid HF directory
-        model_class_ref = config.auto_map["AutoModelForCausalLM"]
-        model_class = get_class_from_dynamic_module(
-            class_reference=model_class_ref,
-            pretrained_model_name_or_path="deepseek-ai/DeepSeek-V3",
-            cache_dir=None,
-            force_download=False,
-            resume_download=True,
-            proxies=None,
-            use_auth_token=None,
-            revision=None,
-            local_files_only=False,
-            repo_id="deepseek-ai/DeepSeek-V3",
-        )
+        model_class = get_causal_lm_class_via_auto_map("deepseek-ai/DeepSeek-V3", config)
         model = model_class(config)
         model = model.bfloat16() if hasattr(model, "bfloat16") else model
 
@@ -89,9 +75,6 @@ class TestDeepSeekConversion:
 
         # Save model and config
         model.save_pretrained(model_dir, safe_serialization=True)
-        model.save_pretrained(model_dir, safe_serialization=True)
-        modeling_filepath = os.path.abspath(sys.modules[model_class.__module__].__file__)
-        shutil.copy(modeling_filepath, model_dir)
 
         # Ensure config.json exists with expected keys
         config_path = model_dir / "config.json"
@@ -122,8 +105,8 @@ class TestDeepSeekConversion:
             "-m",
             "coverage",
             "run",
-            "--data-file=/opt/Megatron-Bridge/.coverage",
-            "--source=/opt/Megatron-Bridge/",
+            "--data-file=/workspace/.coverage",
+            "--source=/workspace/",
             "--parallel-mode",
             "examples/conversion/hf_megatron_roundtrip_multi_gpu.py",
             "--hf-model-id",

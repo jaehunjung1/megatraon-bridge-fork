@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import os
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import torch
 
@@ -21,8 +21,6 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.data.vlm_datasets import (
     HFDatasetConversationProvider,
 )
-from megatron.bridge.data.vlm_datasets.mock_provider import MockVLMConversationProvider
-from megatron.bridge.peft.lora import VLMLoRA
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
@@ -37,14 +35,23 @@ from megatron.bridge.training.config import (
 )
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig
 
+from megatron.bridge.peft.lora import VLMLoRA
+
 
 def pretrain_config(
     dir: Optional[str] = None,
     name: str = "nemotron_nano_v2_vl_pretrain",
-    hf_model_path: str = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+    hf_model_path: str = "nvidia/Nemotron-Nano-12B-v2-VL-BF16",
     # Dataset configuration
-    dataset_type: Optional[str] = None,
+    data_paths: Optional[List[str]] = None,
+    data_args_path: Optional[str] = None,
+    train_data_path: Optional[List[str]] = None,
+    valid_data_path: Optional[List[str]] = None,
+    test_data_path: Optional[List[str]] = None,
+    per_split_data_args_path: Optional[str] = None,
     mock: bool = False,
+    use_preloaded: bool = False,
+    image_folder: Optional[str] = None,
     dataset_maker_name: str = "make_cord_v2_dataset",
     # Model configuration
     tensor_parallelism: int = 4,
@@ -53,6 +60,7 @@ def pretrain_config(
     virtual_pipeline_parallelism: Optional[int] = None,
     context_parallelism: int = 1,
     sequence_parallelism: bool = False,
+    use_megatron_fsdp: bool = False,
     # Training hyperparameters
     train_iters: int = 300000,
     global_batch_size: int = 32,
@@ -65,6 +73,10 @@ def pretrain_config(
     # Precision and comm overlap
     precision_config: Optional[Union[MixedPrecisionConfig, str]] = "bf16_mixed",
     comm_overlap_config: Optional[CommOverlapConfig] = None,
+    # Freeze options
+    freeze_language_model: bool = False,
+    freeze_vision_model: bool = False,
+    freeze_vision_projection: bool = False,
     # Checkpointing
     save_interval: Optional[int] = 200,
 ) -> ConfigContainer:
@@ -97,29 +109,18 @@ def pretrain_config(
         min_lr=min_lr,
     )
 
-    # Dataset provider selection
-    _dataset_choice = (dataset_type or ("mock" if mock else "hf")).lower()
-
-    if _dataset_choice == "mock":
-        dataset_cfg = MockVLMConversationProvider(
-            sequence_length=seq_length,
-            hf_processor_path=hf_model_path,
-            dataloader_type="single",
-        )
-    elif _dataset_choice == "hf":
-        dataset_cfg = HFDatasetConversationProvider(
-            sequence_length=seq_length,
-            hf_processor_path=hf_model_path,
-            maker_name=dataset_maker_name,
-            # Dataloader config parameters
-            num_workers=2,
-            dataloader_type="single",
-            data_sharding=True,
-            pin_memory=True,
-            persistent_workers=False,
-        )
-    else:
-        raise ValueError(f"Unknown dataset_type '{_dataset_choice}'. Expected one of: 'mock', 'hf', 'preloaded'.")
+    # Use HF-based VLM conversation dataset provider
+    dataset_cfg = HFDatasetConversationProvider(
+        sequence_length=seq_length,
+        hf_processor_path=hf_model_path,
+        maker_name=dataset_maker_name,
+        # Dataloader config parameters
+        num_workers=2,
+        dataloader_type="single",
+        data_sharding=True,
+        pin_memory=True,
+        persistent_workers=False,
+    )
 
     # Config Container
     cfg = ConfigContainer(

@@ -14,7 +14,7 @@
 
 import logging
 from functools import partial
-from typing import Any, Iterable
+from typing import Iterable
 
 import torch
 from megatron.core import parallel_state
@@ -22,16 +22,15 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.utils import get_batch_on_this_cp_rank, get_model_config
 
 from megatron.bridge.training.config import ConfigContainer
-from megatron.bridge.training.losses import (
-    create_masked_next_token_loss_function as _create_loss_function,
-)
 from megatron.bridge.training.state import GlobalState
+from megatron.bridge.training.utils.loss_utils import create_loss_function as _create_loss_function
 from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
 from megatron.bridge.training.utils.padding_utils import (
     pad_or_truncate_2d_to_len,
     pad_or_truncate_attn_to_len,
     pad_or_truncate_pos_to_len,
 )
+from megatron.bridge.training.utils.visual_inputs import Qwen2_5_VLVisualInputs
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,7 @@ def get_batch_from_iterator(
     data_iterator: Iterable,
     use_mtp: bool = False,
     skip_getting_attention_mask_from_dataset: bool = True,
-) -> dict[str, Any]:
+) -> dict[str, torch.Tensor]:
     """Get a batch of data from the iterator.
 
     Args:
@@ -104,7 +103,7 @@ def get_batch(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    Any,
+    Qwen2_5_VLVisualInputs,
 ]:
     """Generate a batch.
 
@@ -118,7 +117,7 @@ def get_batch(
         cu_seqlens, cu_seqlens_argmin, max_seqlen, visual_inputs (container of optional modalities)
     """
     if (not parallel_state.is_pipeline_first_stage()) and (not parallel_state.is_pipeline_last_stage()):
-        return None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, Qwen2_5_VLVisualInputs()
 
     batch = get_batch_from_iterator(
         data_iterator,

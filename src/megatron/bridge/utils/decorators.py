@@ -17,8 +17,6 @@ import logging
 import warnings
 from typing import Any, Callable, TypeVar
 
-from megatron.bridge.utils.common_utils import get_rank_safe
-
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +32,7 @@ def experimental_fn(func: Callable[..., R]) -> Callable[..., R]:
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> R:
-        if get_rank_safe() == 0:
-            warnings.warn(warning_message, stacklevel=2)
+        warnings.warn(warning_message, stacklevel=2)
         return func(*args, **kwargs)
 
     return wrapper

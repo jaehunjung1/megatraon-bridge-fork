@@ -17,10 +17,8 @@ import inspect
 import logging
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
-import modelopt.torch.distill as mtd
-import modelopt.torch.distill.plugins.megatron as mtd_mcore
 import torch
 from megatron.core import parallel_state
 from megatron.core.models.gpt import GPTModel as MCoreGPTModel
@@ -30,18 +28,11 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 )
 from megatron.core.post_training.modelopt.gpt.model_specs import get_gpt_modelopt_spec
 from megatron.core.transformer import ModuleSpec
-from megatron.core.transformer.dot_product_attention import DotProductAttention as MCoreDotProductAttention
-from megatron.core.transformer.enums import AttnBackend
-from megatron.core.transformer.transformer_config import TransformerConfig
 
 from megatron.bridge.models.model_provider import ModelProviderMixin
 from megatron.bridge.models.transformer_config import TransformerConfig
 from megatron.bridge.utils import fusions
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-
-
-if TYPE_CHECKING:
-    from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 
 
 logger = logging.getLogger(__name__)
@@ -165,17 +156,23 @@ class GPTModelProvider(TransformerConfig, ModelProviderMixin[MCoreGPTModel]):
     # Additional parameters that might be needed
     init_model_with_meta_device: bool = False
     use_te_rng_tracker: bool = False
+    enable_cuda_graph: bool = False
     virtual_pipeline_model_parallel_size: Optional[int] = None
     account_for_embedding_in_pipeline_split: bool = False
     account_for_loss_in_pipeline_split: bool = False
 
     # Fusions
-    masked_softmax_fusion: bool = True
+    masked_softmax_fusion: bool = field(default_factory=fusions.can_enable_masked_softmax_fusion)
     cross_entropy_loss_fusion: bool = True  # Generally beneficial, no specific dependencies
     gradient_accumulation_fusion: bool = field(default_factory=fusions.can_enable_gradient_accumulation_fusion)
+    bias_activation_fusion: bool = False  # Disabled by default as it can interfere with certain architectures
+    persist_layer_norm: bool = False
+    bias_dropout_fusion: bool = field(default_factory=fusions.can_enable_bias_dropout_fusion)
+    apply_rope_fusion: bool = field(default_factory=fusions.can_enable_apply_rope_fusion)
 
     # If True, restore the modelopt_state that contains quantization, sparsity, speculative decoding transformation state.
     # When resuming modelopt_state, we also change the transformer_layer_spec to `megatron.core.post_training.modelopt.gpt.model_specs` which is a combination of local spec + TEDotProductAttention.
+
     restore_modelopt_state: bool = False
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreGPTModel:
@@ -193,7 +190,7 @@ class GPTModelProvider(TransformerConfig, ModelProviderMixin[MCoreGPTModel]):
         if not fusions.validate_rope_fusion_compatibility(self):
             self.apply_rope_fusion = False
 
-        if self.cuda_graph_impl != "none":
+        if self.enable_cuda_graph:
             assert getattr(self, "use_te_rng_tracker", False), (
                 "Transformer engine's RNG tracker is required for cudagraphs, it can be "
                 "enabled with use_te_rng_tracker=True'."
@@ -241,9 +238,7 @@ class GPTModelProvider(TransformerConfig, ModelProviderMixin[MCoreGPTModel]):
         kwargs = {}
         if "mtp_block_spec" in inspect.signature(MCoreGPTModel.__init__).parameters:
             kwargs["mtp_block_spec"] = mtp_block_spec(self, vp_stage=vp_stage)
-        if self.attention_backend == AttnBackend.local:
-            if hasattr(transformer_layer_spec, "submodules"):
-                transformer_layer_spec.submodules.self_attention.submodules.core_attention = MCoreDotProductAttention
+
         with model_init_device_context():
             model = MCoreGPTModel(
                 self,
@@ -296,61 +291,6 @@ class GPTModelProvider(TransformerConfig, ModelProviderMixin[MCoreGPTModel]):
         return model
 
 
-@dataclass
-class GPTDistillationProvider(GPTModelProvider):
-    """Provider for Megatron Core GPT models in distillation mode."""
-
-    teacher: Optional["GPTModelProvider"] = None
-    kd_config: Optional["ModelOptDistillConfig"] = None
-
-    def __post_init__(self):
-        assert self.teacher is not None, "Teacher model must be provided."
-        shared_attrs = [
-            "tensor_model_parallel_size",
-            "pipeline_model_parallel_size",
-            "context_parallel_size",
-            "seq_length",
-            "pipeline_dtype",
-        ]
-        for attr in shared_attrs:
-            if getattr(self, attr) != getattr(self.teacher, attr):
-                raise ValueError(f"Student and teacher providers must have the same {attr}.")
-
-    def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreGPTModel:
-        """Configure and instantiate a ModelOpt DistillationModel based on this configuration.
-
-        Args:
-            pre_process: Whether to include pre-processing in the model, defaults to first pipeline stage
-            post_process: Whether to include post-processing in the model, defaults to last pipeline stage
-            vp_stage: Virtual pipeline stage
-
-        Returns:
-            MCoreGPTModel: Configured ModelOpt DistillationModel instance
-        """
-        if vp_stage is not None:
-            raise ValueError("ModelOpt KD currently does not support virtual-pipeline parallel.")
-
-        student_model = super().provide(pre_process, post_process, vp_stage)
-        teacher_model = self.teacher.provide(pre_process, post_process, vp_stage)
-
-        kd_cfg = mtd_mcore.setup_distillation_config(self.kd_config, student_model.config, teacher_model.config)
-        modelopt_cfg = {
-            "teacher_model": teacher_model,
-            "criterion": kd_cfg.criterion,
-            "loss_balancer": kd_cfg.loss_balancer,
-        }
-        kd_model = mtd.convert(student_model, mode=[("kd_loss", modelopt_cfg)])
-        mtd_mcore.adjust_distillation_model_for_mcore(kd_model, kd_cfg)
-
-        return kd_model
-
-    def __setattr__(self, name, value):
-        super().__setattr__(name, value)
-        # Mirror to teacher if it has that attribute
-        if hasattr(self.teacher, name):
-            setattr(self.teacher, name, value)
-
-
 def mtp_block_spec(config: "GPTModelProvider", vp_stage: Optional[int] = None) -> Optional[ModuleSpec]:
     """Pass in the MTP block spec if model has MTP layers.
 
@@ -394,7 +334,6 @@ class GPTProvider126M(GPTModelProvider):
     num_attention_heads: int = 12
     bias_activation_fusion: bool = True
     bias_dropout_add_fusion: bool = True
-    use_transformer_engine_full_layer_spec: bool = True
 
 
 @dataclass
@@ -412,7 +351,6 @@ class GPTProvider5B(GPTModelProvider):
     num_attention_heads: int = 32
     bias_activation_fusion: bool = True
     bias_dropout_add_fusion: bool = True
-    use_transformer_engine_full_layer_spec: bool = True
 
 
 @dataclass
@@ -430,7 +368,6 @@ class GPTProvider7B(GPTModelProvider):
     num_attention_heads: int = 32
     bias_activation_fusion: bool = True
     bias_dropout_add_fusion: bool = True
-    use_transformer_engine_full_layer_spec: bool = True
 
 
 @dataclass
@@ -448,7 +385,6 @@ class GPTProvider20B(GPTModelProvider):
     num_attention_heads: int = 48
     bias_activation_fusion: bool = True
     bias_dropout_add_fusion: bool = True
-    use_transformer_engine_full_layer_spec: bool = True
 
 
 @dataclass
@@ -466,7 +402,6 @@ class GPTProvider40B(GPTModelProvider):
     num_attention_heads: int = 64
     bias_activation_fusion: bool = True
     bias_dropout_add_fusion: bool = True
-    use_transformer_engine_full_layer_spec: bool = True
 
 
 @dataclass
@@ -486,5 +421,4 @@ class GPTProvider175B(GPTModelProvider):
     attention_dropout: float = 0.0
     bias_activation_fusion: bool = True
     bias_dropout_add_fusion: bool = True
-    use_transformer_engine_full_layer_spec: bool = True
     layernorm_zero_centered_gamma: bool = True

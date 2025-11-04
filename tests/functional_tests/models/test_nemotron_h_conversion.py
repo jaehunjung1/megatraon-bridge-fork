@@ -22,7 +22,8 @@ from pathlib import Path
 import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+from megatron.bridge.models.conversion.utils import get_causal_lm_class_via_auto_map
 
 
 # Overrides for 8B size
@@ -75,19 +76,7 @@ class TestNemotronHConversion:
             setattr(config, k, v)
 
         # Create model with random weights and convert to bfloat16
-        model_class_ref = config.auto_map["AutoModelForCausalLM"]
-        model_class = get_class_from_dynamic_module(
-            class_reference=model_class_ref,
-            pretrained_model_name_or_path="nvidia/Nemotron-H-8B-Base-8K",
-            cache_dir=None,
-            force_download=False,
-            resume_download=True,
-            proxies=None,
-            use_auth_token=None,
-            revision=None,
-            local_files_only=False,
-            repo_id="nvidia/Nemotron-H-8B-Base-8K",
-        )
+        model_class = get_causal_lm_class_via_auto_map("nvidia/Nemotron-H-8B-Base-8K", config)
         model = model_class(config)
         model = model.bfloat16() if hasattr(model, "bfloat16") else model
 
@@ -209,8 +198,8 @@ class TestNemotronHConversion:
             "-m",
             "coverage",
             "run",
-            "--data-file=/opt/Megatron-Bridge/.coverage",
-            "--source=/opt/Megatron-Bridge/",
+            "--data-file=/workspace/.coverage",
+            "--source=/workspace/",
             "--parallel-mode",
             "examples/conversion/hf_megatron_roundtrip_multi_gpu.py",
             "--hf-model-id",
