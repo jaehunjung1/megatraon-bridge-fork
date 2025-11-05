@@ -22,13 +22,13 @@ model:
 
 train:
   train_iters: 2000
-  global_batch_size: 32
+  global_batch_size: 64
   micro_batch_size: 1
   eval_iters: 0
 
 optimizer:
-  lr: 2e-5
-  min_lr: 2e-6
+  lr: 5e-6
+  min_lr: 5e-7
 
 scheduler:
   lr_warmup_iters: 5

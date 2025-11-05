@@ -32,7 +32,7 @@ from .token_utils import json2token
 
 
 def make_custom_dataset(
-    path_or_dataset: str, split: str = "train", **kwargs
+    path_or_dataset: str, **kwargs
 ) -> List[Dict[str, Any]]:
     from datasets import Dataset, Image
 
@@ -58,7 +58,6 @@ def make_custom_dataset(
         assistant_text = sample["messages"][1]["content"]
         assistant_content = [{"type": "text", "text": assistant_text}]
         assert sample["messages"][1]["role"] == "assistant", "Second role in dataset messages is not `assistant`."
-
 
         out_samples.append({
             "conversation": [
